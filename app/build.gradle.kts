@@ -12,8 +12,8 @@ android {
         applicationId = "jp.arika.controllerdiagnostics"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
     }
 
     buildFeatures {
@@ -29,5 +29,7 @@ dependencies {
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+
+    testImplementation(libs.junit)
     debugImplementation(libs.androidx.ui.tooling)
 }
