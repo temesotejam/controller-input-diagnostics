@@ -4,30 +4,49 @@ import android.hardware.input.InputManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -35,6 +54,20 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+private val ControllerColorScheme = darkColorScheme(
+    primary = Color(0xFF74E3FF),
+    onPrimary = Color(0xFF00151C),
+    primaryContainer = Color(0xFF123C49),
+    onPrimaryContainer = Color(0xFFC4F3FF),
+    secondary = Color(0xFFB5A2FF),
+    onSecondary = Color(0xFF201442),
+    secondaryContainer = Color(0xFF33265D),
+    surface = Color(0xFF0B1117),
+    surfaceVariant = Color(0xFF17232C),
+    onSurface = Color(0xFFE7F1F5),
+    onSurfaceVariant = Color(0xFFB6C7CF),
+    outline = Color(0xFF536873)
+)
 /**
  * PS4 / PS5 コントローラが Android へ公開する入力を調べる診断アプリ。
  * Bluetooth のペアリングは Android OS に任せ、ここでは標準入力イベントだけを観測する。
@@ -51,7 +84,7 @@ class MainActivity : ComponentActivity(), InputManager.InputDeviceListener {
         inputManager = getSystemService(InputManager::class.java)
         refreshDevices("アプリを開始しました")
         setContent {
-            MaterialTheme {
+            MaterialTheme(colorScheme = ControllerColorScheme) {
                 DiagnosticsScreen(
                     state = screenState,
                     onRefresh = { refreshDevices("入力デバイス一覧を更新しました") },
@@ -128,8 +161,26 @@ class MainActivity : ComponentActivity(), InputManager.InputDeviceListener {
             append(" repeat=")
             append(event.repeatCount)
         }
+        Log.i(TAG, message)
+
         screenState = screenState.copy(
             status = "ボタン入力を受信: ${event.device?.name ?: event.deviceId}",
+            pressedKeys = screenState.pressedKeys.run {
+                when (event.action) {
+                    KeyEvent.ACTION_DOWN -> this + event.keyCode
+                    KeyEvent.ACTION_UP -> this - event.keyCode
+                    else -> this
+                }
+            },
+            lastKeyCode = if (event.action == KeyEvent.ACTION_DOWN) event.keyCode else screenState.lastKeyCode,
+            pressedScanCodes = screenState.pressedScanCodes.run {
+                when (event.action) {
+                    KeyEvent.ACTION_DOWN -> this + event.scanCode
+                    KeyEvent.ACTION_UP -> this - event.scanCode
+                    else -> this
+                }
+            },
+            lastScanCode = if (event.action == KeyEvent.ACTION_DOWN) event.scanCode else screenState.lastScanCode,
             importantEvents = prependEvent(screenState.importantEvents, message, MAX_IMPORTANT_EVENTS)
         )
         return true
@@ -156,7 +207,10 @@ class MainActivity : ComponentActivity(), InputManager.InputDeviceListener {
             previousMs = lastMotionLogTimeMs,
             intervalMs = MOTION_LOG_INTERVAL_MS
         )
-        if (shouldLog) lastMotionLogTimeMs = event.eventTime
+        if (shouldLog) {
+            lastMotionLogTimeMs = event.eventTime
+            Log.d(TAG, "MOTION source=${sourceName(event.source)} device=${event.deviceId} " + readings.joinToString { "${it.name}=${it.value.fmt()}[${it.min.fmt()}..${it.max.fmt()}]" })
+        }
 
         val summary = readings
             .filter { it.axis in SUMMARY_AXES }
@@ -200,6 +254,7 @@ class MainActivity : ComponentActivity(), InputManager.InputDeviceListener {
             intervalMs = POINTER_MOVE_LOG_INTERVAL_MS
         )
         if (isMove && shouldLogMove) lastPointerMoveLogTimeMs = event.eventTime
+        if (shouldLogMove) Log.d(TAG, "POINTER source=${sourceName(event.source)} action=${motionActionName(event.actionMasked)} raw=(${firstPoint.rawX.fmt()},${firstPoint.rawY.fmt()}) norm=${firstPoint.normalizedText()}")
 
         var gesture = screenState.lastGesture
         var importantEvents = screenState.importantEvents
@@ -250,6 +305,7 @@ class MainActivity : ComponentActivity(), InputManager.InputDeviceListener {
         screenState = screenState.copy(
             status = "ポインタ入力を受信: ${event.device?.name ?: event.deviceId}",
             lastPointer = message,
+            lastPointerPoint = firstPoint,
             lastGesture = gesture,
             importantEvents = importantEvents,
             pointerEvents = if (shouldLogMove) {
@@ -282,8 +338,7 @@ class MainActivity : ComponentActivity(), InputManager.InputDeviceListener {
             (isFromSource(InputDevice.SOURCE_JOYSTICK) || isFromSource(InputDevice.SOURCE_GAMEPAD))
 
     private fun MotionEvent.isPointerDiagnosticEvent(): Boolean =
-        isFromSource(InputDevice.SOURCE_TOUCHPAD) ||
-            (device?.isExternal == true && isFromSource(InputDevice.SOURCE_MOUSE))
+        isFromSource(InputDevice.SOURCE_TOUCHPAD) || isFromSource(InputDevice.SOURCE_MOUSE)
 
     private fun Float.normalizeWith(range: InputDevice.MotionRange?): Float? {
         if (range == null || range.range == 0f) return null
@@ -299,6 +354,7 @@ class MainActivity : ComponentActivity(), InputManager.InputDeviceListener {
         previousMs == Long.MIN_VALUE || nowMs < previousMs || nowMs - previousMs >= intervalMs
 
     companion object {
+        private const val TAG = "ControllerDiag"
         private const val MAX_IMPORTANT_EVENTS = 80
         private const val MAX_POINTER_EVENTS = 60
         private const val MAX_MOTION_EVENTS = 30
@@ -329,8 +385,13 @@ private data class DiagnosticState(
     val status: String = "コントローラを待機中",
     val lastMotion: String = "未受信",
     val lastPointer: String = "未受信",
+    val lastPointerPoint: PointerPoint? = null,
     val lastAxes: List<AxisReading> = emptyList(),
     val lastGesture: TouchGesture = TouchGesture.NONE,
+    val pressedKeys: Set<Int> = emptySet(),
+    val lastKeyCode: Int? = null,
+    val pressedScanCodes: Set<Int> = emptySet(),
+    val lastScanCode: Int? = null,
     val importantEvents: List<String> = emptyList(),
     val pointerEvents: List<String> = emptyList(),
     val motionEvents: List<String> = emptyList()
@@ -443,57 +504,332 @@ private data class PointerPoint(
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@androidx.compose.runtime.Composable
+@Composable
 private fun DiagnosticsScreen(
     state: DiagnosticState,
     onRefresh: () -> Unit,
     onClearLog: () -> Unit
 ) {
-    Scaffold(topBar = { TopAppBar(title = { Text("Controller Input Diagnostics") }) }) { padding ->
-        LazyColumn(
+    var showDetails by rememberSaveable { mutableStateOf(false) }
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.surface,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("CONTROLLER LAB", fontWeight = FontWeight.Black)
+                        Text("Input monitor", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            item { Text(state.status, style = MaterialTheme.typography.bodyMedium) }
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onRefresh) { Text("再検索") }
-                    OutlinedButton(onClick = onClearLog) { Text("履歴を消去") }
+            StatusHero(state)
+            RealtimeDashboard(state)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onClick = onRefresh, modifier = Modifier.weight(1f)) { Text("Refresh") }
+                OutlinedButton(onClick = { showDetails = !showDetails }, modifier = Modifier.weight(1f)) {
+                    Text(if (showDetails) "Hide details" else "Details")
                 }
             }
-            item { DeviceCard(state.devices) }
-            item {
-                SectionCard("最後のモーションイベント") {
-                    Text(state.lastMotion)
+            if (showDetails) {
+                OutlinedButton(onClick = onClearLog, modifier = Modifier.fillMaxWidth()) { Text("Clear history") }
+                DeviceCard(state.devices)
+                SectionCard("Last motion event") { Text(state.lastMotion) }
+                AxisCard(state.lastAxes)
+                SectionCard("Last pointer event") {
+                    Text(state.lastPointer, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                 }
+                EventSection("Important events", state.importantEvents)
+                EventSection("Pointer history", state.pointerEvents)
+                EventSection("Motion history", state.motionEvents)
             }
-            item { AxisCard(state.lastAxes) }
-            item {
-                SectionCard("最後のポインタイベント") {
-                    Text(state.lastPointer, fontFamily = FontFamily.Monospace)
-                }
-            }
-            item {
-                SectionCard("タッチパッド・ジェスチャー") {
-                    Text("最後の判定: ${state.lastGesture.label}", fontWeight = FontWeight.Bold)
-                    Text(
-                        "TOUCHPAD、または外部MOUSEとして届くイベントを監視します。" +
-                            "座標レンジが取得できない場合は生座標だけを表示し、誤ったジェスチャー判定は行いません。",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-            item { EventSection("重要イベント（新しい順）", state.importantEvents) }
-            item { EventSection("ポインタ履歴（MOVEは50 ms間引き）", state.pointerEvents) }
-            item { EventSection("モーション履歴（100 ms間引き）", state.motionEvents) }
         }
     }
 }
 
-@androidx.compose.runtime.Composable
+@Composable
+private fun StatusHero(state: DiagnosticState) {
+    val connected = state.devices.isNotEmpty()
+    val deviceName = state.devices.firstOrNull()?.name ?: "Waiting for controller"
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .background(
+                    Brush.linearGradient(
+                        listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.secondaryContainer)
+                    )
+                )
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Surface(
+                    shape = RoundedCornerShape(99.dp),
+                    color = if (connected) Color(0xFF53E69D) else MaterialTheme.colorScheme.outline
+                ) {
+                    Text(
+                        if (connected) "LIVE" else "WAITING",
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        color = Color(0xFF07130D),
+                        fontWeight = FontWeight.Black,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+                Text("DUALSENSE INPUT CHECK", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+            }
+            Text(deviceName, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+            Text(state.status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
+        }
+    }
+}
+@Composable
+private fun RealtimeDashboard(state: DiagnosticState) {
+    val byAxis = state.lastAxes.associateBy { it.axis }
+    fun axis(code: Int): AxisReading? = byAxis[code]
+
+    SectionCard("LIVE CONTROLS") {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            StickPanel("LEFT STICK", axis(MotionEvent.AXIS_X), axis(MotionEvent.AXIS_Y), Modifier.weight(1f))
+            StickPanel("RIGHT STICK", axis(MotionEvent.AXIS_LTRIGGER), axis(MotionEvent.AXIS_RTRIGGER), Modifier.weight(1f))
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            TriggerPanel("L2", axis(MotionEvent.AXIS_Z), Modifier.weight(1f))
+            TriggerPanel("R2", axis(MotionEvent.AXIS_RZ), Modifier.weight(1f))
+        }
+        DpadPanel(axis(MotionEvent.AXIS_HAT_X), axis(MotionEvent.AXIS_HAT_Y), Modifier.fillMaxWidth())
+    }
+    SectionCard("BUTTON MATRIX") {
+        val last = state.lastScanCode
+        Text("LAST  ${last?.let(::dualSenseInputName) ?: "No input yet"}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        ButtonPanel(state.pressedScanCodes, last, Modifier.fillMaxWidth())
+    }
+    SectionCard("TOUCH SURFACE") {
+        TouchpadPanel(state.lastPointerPoint)
+        val touchLabel = when {
+            state.lastScanCode == DUALSENSE_TOUCHPAD_CLICK_SCAN_CODE -> "Touchpad click detected"
+            state.lastPointerPoint != null -> "Pointer coordinates detected"
+            else -> "Pointer coordinates unavailable on this Bluetooth connection"
+        }
+        Text(touchLabel, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+@Composable
+private fun RawAxisPanel(readings: List<AxisReading>) {
+    val displayedAxes = listOf(
+        MotionEvent.AXIS_X to "Left stick: left / right",
+        MotionEvent.AXIS_Y to "Left stick: up / down",
+        MotionEvent.AXIS_LTRIGGER to "Right stick: left / right",
+        MotionEvent.AXIS_RTRIGGER to "Right stick: up / down",
+        MotionEvent.AXIS_Z to "L2 trigger",
+        MotionEvent.AXIS_RZ to "R2 trigger",
+        MotionEvent.AXIS_HAT_X to "D-pad: left / right",
+        MotionEvent.AXIS_HAT_Y to "D-pad: up / down"
+    )
+    val byAxis = readings.associateBy { it.axis }
+    displayedAxes.forEach { (axis, physicalName) ->
+        RawAxisMeter(byAxis[axis], "$physicalName  (${MotionEvent.axisToString(axis)})")
+    }
+}
+
+@Composable
+private fun RawAxisMeter(axis: AxisReading?, label: String) {
+    val line = MaterialTheme.colorScheme.outline
+    val active = MaterialTheme.colorScheme.primary
+    val fill = MaterialTheme.colorScheme.surfaceVariant
+    val unit = axis?.unitValue() ?: 0.5f
+    Column {
+        Text("$label   ${axis?.value?.fmt() ?: "No event"}", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+        Canvas(modifier = Modifier.fillMaxWidth().height(28.dp).background(fill)) {
+            val centerX = size.width / 2f
+            val y = size.height / 2f
+            drawLine(line, Offset(0f, y), Offset(size.width, y), strokeWidth = 3f)
+            drawLine(line, Offset(centerX, 2f), Offset(centerX, size.height - 2f), strokeWidth = 2f)
+            if (axis != null) drawCircle(active, radius = 10f, center = Offset(size.width * unit, y))
+        }
+        Text("range: ${axis?.min?.fmt() ?: "--"} to ${axis?.max?.fmt() ?: "--"}", style = MaterialTheme.typography.bodySmall)
+    }
+}
+@Composable
+private fun StickPanel(title: String, xAxis: AxisReading?, yAxis: AxisReading?, modifier: Modifier = Modifier) {
+    val line = MaterialTheme.colorScheme.outline
+    val active = MaterialTheme.colorScheme.primary
+    val fill = MaterialTheme.colorScheme.surfaceVariant
+    val x = xAxis?.unitValue()?.minus(0.5f) ?: 0f
+    val y = yAxis?.unitValue()?.minus(0.5f) ?: 0f
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(title, fontWeight = FontWeight.Bold)
+        Canvas(modifier = Modifier.size(76.dp).background(fill)) {
+            val center = Offset(size.width / 2f, size.height / 2f)
+            val radius = size.minDimension * 0.40f
+            drawCircle(color = line, radius = radius, center = center, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f))
+            drawLine(line, Offset(center.x - radius, center.y), Offset(center.x + radius, center.y), strokeWidth = 2f)
+            drawLine(line, Offset(center.x, center.y - radius), Offset(center.x, center.y + radius), strokeWidth = 2f)
+            drawCircle(active, radius = 12f, center = Offset(center.x + x * radius * 1.65f, center.y + y * radius * 1.65f))
+        }
+        Text("X ${xAxis?.value?.fmt() ?: "--"}  /  Y ${yAxis?.value?.fmt() ?: "--"}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun TriggerPanel(title: String, axis: AxisReading?, modifier: Modifier = Modifier) {
+    val amount = axis?.unitValue() ?: 0f
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(title, fontWeight = FontWeight.Black)
+            Text("${(amount * 100).toInt()}%", fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary)
+        }
+        LinearProgressIndicator(progress = { amount }, modifier = Modifier.fillMaxWidth().height(8.dp))
+    }
+}
+@Composable
+private fun DpadPanel(xAxis: AxisReading?, yAxis: AxisReading?, modifier: Modifier = Modifier) {
+    val x = xAxis?.value ?: 0f
+    val y = yAxis?.value ?: 0f
+    Column(modifier = modifier) {
+        Text("十字キー", fontWeight = FontWeight.Bold)
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            DirectionKey("↑", y < -0.5f)
+            DirectionKey("↓", y > 0.5f)
+            DirectionKey("←", x < -0.5f)
+            DirectionKey("→", x > 0.5f)
+        }
+    }
+}
+
+@Composable
+private fun DirectionKey(label: String, active: Boolean) {
+    Surface(color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant) {
+        Text(label, modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun ButtonPanel(pressedScanCodes: Set<Int>, lastScanCode: Int?, modifier: Modifier = Modifier) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            GameButton("\u25A1", 304, pressedScanCodes, lastScanCode)
+            GameButton("\u00D7", 305, pressedScanCodes, lastScanCode)
+            GameButton("\u25CB", 306, pressedScanCodes, lastScanCode)
+            GameButton("\u25B3", 307, pressedScanCodes, lastScanCode)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            GameButton("L1", 308, pressedScanCodes, lastScanCode)
+            GameButton("R1", 309, pressedScanCodes, lastScanCode)
+            GameButton("L2", 310, pressedScanCodes, lastScanCode)
+            GameButton("R2", 311, pressedScanCodes, lastScanCode)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            GameButton("L3", 314, pressedScanCodes, lastScanCode)
+            GameButton("R3", 315, pressedScanCodes, lastScanCode)
+            GameButton("TOUCH", DUALSENSE_TOUCHPAD_CLICK_SCAN_CODE, pressedScanCodes, lastScanCode)
+        }
+    }
+}
+
+private const val DUALSENSE_TOUCHPAD_CLICK_SCAN_CODE = 317
+
+private fun dualSenseInputName(scanCode: Int): String = when (scanCode) {
+    304 -> "SQUARE"
+    305 -> "CROSS"
+    306 -> "CIRCLE"
+    307 -> "TRIANGLE"
+    308 -> "L1"
+    309 -> "R1"
+    310 -> "L2"
+    311 -> "R2"
+    314 -> "L3"
+    315 -> "R3"
+    DUALSENSE_TOUCHPAD_CLICK_SCAN_CODE -> "TOUCHPAD"
+    else -> "SCAN $scanCode"
+}
+
+@Composable
+private fun GameButton(label: String, scanCode: Int, pressedScanCodes: Set<Int>, lastScanCode: Int?) {
+    val active = scanCode in pressedScanCodes
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+            color = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = FontWeight.Black
+        )
+    }
+}
+@Composable
+private fun TouchpadPanel(point: PointerPoint?) {
+    val line = MaterialTheme.colorScheme.outline
+    val active = MaterialTheme.colorScheme.primary
+    val fill = MaterialTheme.colorScheme.surfaceVariant
+    Canvas(modifier = Modifier.fillMaxWidth().height(64.dp).background(fill)) {
+        drawLine(line, Offset(size.width / 2f, 0f), Offset(size.width / 2f, size.height), strokeWidth = 2f)
+        drawLine(line, Offset(0f, size.height / 2f), Offset(size.width, size.height / 2f), strokeWidth = 2f)
+        if (point?.normalizedX != null && point.normalizedY != null) {
+            drawCircle(active, radius = 13f, center = Offset(size.width * point.normalizedX, size.height * point.normalizedY))
+        }
+    }
+    Text(
+        if (point == null) "座標: 未受信" else "生座標: (${point.rawX.fmt()}, ${point.rawY.fmt()}) / 正規化: ${point.normalizedText()}",
+        fontFamily = FontFamily.Monospace,
+        style = MaterialTheme.typography.bodySmall
+    )
+}
+
+private data class DashboardValues(
+    val profileLabel: String,
+    val leftX: AxisReading?,
+    val leftY: AxisReading?,
+    val rightX: AxisReading?,
+    val rightY: AxisReading?,
+    val leftTrigger: AxisReading?,
+    val rightTrigger: AxisReading?,
+    val dpadX: AxisReading?,
+    val dpadY: AxisReading?
+)
+
+private fun List<AxisReading>.toDashboardValues(): DashboardValues {
+    fun axis(vararg candidates: Int): AxisReading? = candidates
+        .asSequence()
+        .mapNotNull { candidate -> firstOrNull { it.axis == candidate } }
+        .firstOrNull()
+
+    // これは LG style3 でアプリが実際に受信した MotionEvent の軸名にだけ従う。
+    // カーネルの evdev 軸名や HID 生レポートとは別の、Android が変換後に公開する値である。
+    return DashboardValues(
+        profileLabel = "LG style3 実測: X/Y・Z/RZ・LTRIGGER/RTRIGGER",
+        leftX = axis(MotionEvent.AXIS_X),
+        leftY = axis(MotionEvent.AXIS_Y),
+        rightX = axis(MotionEvent.AXIS_Z),
+        rightY = axis(MotionEvent.AXIS_RZ),
+        leftTrigger = axis(MotionEvent.AXIS_LTRIGGER),
+        rightTrigger = axis(MotionEvent.AXIS_RTRIGGER),
+        dpadX = axis(MotionEvent.AXIS_HAT_X),
+        dpadY = axis(MotionEvent.AXIS_HAT_Y)
+    )
+}
+private fun AxisReading.unitValue(): Float? =
+    if (max <= min) null else ((value - min) / (max - min)).coerceIn(0f, 1f)
+
+private fun axisText(label: String, axis: AxisReading?): String =
+    if (axis == null) "$label: --" else "${axis.name}=${axis.value.fmt()}"
+
+@Composable
 private fun DeviceCard(devices: List<DiagnosticDevice>) = SectionCard("接続入力デバイス") {
     if (devices.isEmpty()) {
         Text("未接続。Android の Bluetooth 設定からコントローラを接続してください。")
@@ -502,64 +838,42 @@ private fun DeviceCard(devices: List<DiagnosticDevice>) = SectionCard("接続入
         Text("${device.name}  (ID: ${device.id})", fontWeight = FontWeight.Bold)
         Text("source=${device.sources} [0x${device.sourceMask.toString(16)}] external=${device.isExternal}")
         Text("descriptor=${device.descriptor}", style = MaterialTheme.typography.bodySmall)
-        if (device.ranges.isEmpty()) {
-            Text("公開されているモーション軸なし", style = MaterialTheme.typography.bodySmall)
-        } else {
-            device.ranges.forEach { range ->
-                Text(
-                    "${range.axisName}(${range.axis}) source=${range.sourceName} " +
-                        "range=[${range.min.fmt()}, ${range.max.fmt()}] flat=${range.flat.fmt()} " +
-                        "fuzz=${range.fuzz.fmt()} res=${range.resolution.fmt()}",
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
+        device.ranges.forEach { range ->
+            Text("${range.axisName}(${range.axis}) source=${range.sourceName} range=[${range.min.fmt()}, ${range.max.fmt()}]", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
 
-@androidx.compose.runtime.Composable
+@Composable
 private fun AxisCard(readings: List<AxisReading>) = SectionCard("全軸の生値") {
-    if (readings.isEmpty()) {
-        Text("軸イベント未受信")
-    }
+    if (readings.isEmpty()) Text("軸イベント未受信")
     readings.forEach { axis ->
-        Text(
-            "${axis.name}(${axis.axis})=${axis.value.fmt()} source=${axis.sourceName} " +
-                "range=[${axis.min.fmt()}, ${axis.max.fmt()}] flat=${axis.flat.fmt()} " +
-                "fuzz=${axis.fuzz.fmt()} res=${axis.resolution.fmt()}",
-            fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.bodySmall
-        )
+        Text("${axis.name}(${axis.axis})=${axis.value.fmt()} source=${axis.sourceName} range=[${axis.min.fmt()}, ${axis.max.fmt()}]", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
     }
 }
 
-@androidx.compose.runtime.Composable
+@Composable
 private fun EventSection(title: String, events: List<String>) {
     SectionCard(title) {
         if (events.isEmpty()) Text("履歴なし")
-        events.forEach { line ->
-            Text(line, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-        }
+        events.forEach { line -> Text(line, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
     }
 }
 
-@androidx.compose.runtime.Composable
-private fun SectionCard(
-    title: String,
-    content: @androidx.compose.runtime.Composable () -> Unit
-) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+@Composable
+private fun SectionCard(title: String, content: @Composable () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.onSurface)
             content()
         }
     }
 }
-
 private fun InputDevice?.isController(): Boolean {
     val source = this?.sources ?: return false
     return source.hasSource(InputDevice.SOURCE_GAMEPAD) || source.hasSource(InputDevice.SOURCE_JOYSTICK)
